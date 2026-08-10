@@ -73,11 +73,35 @@ func main() {
 - `doc.Bytes() ([]byte, error)` 返回字节，便于在内存中处理（如 HTTP 响应）
 - `doc.WriteTo(w io.Writer)` 直接流式写出
 
-## 关于「读取」
+## 读取（提取文本）
 
-本库当前聚焦 **PDF 生成**。原 `samoffice` 仓库中并不存在 PDF 读取/解析实现，因此
-`samaidev/pdfgo` 暂不提供读功能。若后续需要读取（提取文本、合并、拆分等），
-可基于 `pdfcpu` 或 `unipdf` 等扩展，欢迎提 issue 讨论。
+`pdfgo` 同样提供 **PDF 只读** 能力，与 `.doc` / `.xls` / `.ppt` 旧格式的策略一致：
+只能读取，不支持编辑。底层使用 `github.com/ledongthuc/pdf`（纯 Go、轻量）。
+
+```go
+r, _ := pdfgo.OpenReader("report.pdf")
+// 或：pdfgo.OpenReaderBytes(b) / pdfgo.OpenReaderFrom(readerAt, size)
+fmt.Println("页数:", r.PageCount())
+
+// 整篇文本
+text, _ := r.Text()
+fmt.Println(text)
+
+// 按页
+for _, p := range r.Pages() {
+    t, _ := p.Text()
+    fmt.Printf("第 %d 页: %s\n", p.Index()+1, t)
+}
+```
+
+> 注意：文本提取依赖 PDF 内部结构。对于由本库（`Document.Bytes()`）或常见工具
+> 生成的 PDF，提取效果良好；个别结构特殊的 PDF 可能无法提取，此时 `Text()` 会
+> 返回错误而非崩溃（底层 panic 已被兜底）。
+
+## 依赖
+
+- 生成：`github.com/signintech/gopdf`
+- 读取：`github.com/ledongthuc/pdf`
 
 ## 许可证
 
