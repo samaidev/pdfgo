@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -16,11 +17,16 @@ import (
 // 不提供保真编辑（与 .doc/.xls/.ppt 旧格式的只读策略一致）。
 // 生成新 PDF 请使用本包的 Document（基于 gopdf）。
 //
-// 文本提取底层使用 ledongthuc/pdf（纯 Go、轻量），对真实世界产生的
-// PDF（含嵌入字体）具有良好的兼容性。
+// 文本提取底层使用 ledongthuc/pdf（纯 Go、轻量）。对于内容流为
+// FlateDecode 压缩、含嵌入字体的真实 PDF（由办公套件/浏览器生成），
+// 会自动回退到 GetPlainText 路径以解压缩并解析字体编码，从而提取出文字。
+//
+// ledongthuc/pdf 采用惰性解析：页面内容流在调用 Page/Text 时才真正从底层
+// 源读取，因此 Reader 持有底层源并在 Close 时才释放，OpenReader 不会提前关闭文件。
 type Reader struct {
 	r     *pdf.Reader
 	pages []*Page
+	src   io.Closer // 底层源（如 *os.File），需 Close 释放
 }
 
 // Page 表示 PDF 中的一页，支持按页提取文本。
@@ -30,17 +36,24 @@ type Page struct {
 }
 
 // OpenReader 打开一个 PDF 文件并返回只读 Reader。
+// 返回的 Reader 持有底层文件句柄，调用方应在使用完毕后调用 Close 释放。
 func OpenReader(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("pdfgo: 打开 %s 失败: %w", path, err)
 	}
-	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
+		f.Close()
 		return nil, fmt.Errorf("pdfgo: 读取文件信息失败: %w", err)
 	}
-	return openFrom(f, fi.Size())
+	r, err := openFrom(f, fi.Size())
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	r.src = f
+	return r, nil
 }
 
 // OpenReaderBytes 从字节切片打开 PDF。
@@ -70,6 +83,15 @@ func openFrom(r io.ReaderAt, size int64) (*Reader, error) {
 // PageCount 返回 PDF 总页数。
 func (r *Reader) PageCount() int {
 	return len(r.pages)
+}
+
+// Close 释放底层源（如文件句柄）。仅当 OpenReader 打开文件时需要调用；
+// OpenReaderBytes/OpenReaderFrom 传入的内存源无需（也不会）被关闭。
+func (r *Reader) Close() error {
+	if r.src != nil {
+		return r.src.Close()
+	}
+	return nil
 }
 
 // Pages 返回所有页的切片。
@@ -127,6 +149,19 @@ func (p *Page) Text() (string, error) {
 	}()
 
 	page := p.reader.r.Page(p.num)
+
+	// 优先走 GetPlainText：它会在内部解压缩 FlateDecode 内容流并解析
+	// 字体编码/ToUnicode CMap，对由办公套件/浏览器生成的真实 PDF 兼容性最好。
+	fontMap := map[string]*pdf.Font{}
+	for _, fn := range page.Fonts() {
+		f := page.Font(fn)
+		fontMap[fn] = &f
+	}
+	if plain, perr := page.GetPlainText(fontMap); perr == nil && strings.TrimSpace(plain) != "" {
+		return plain, nil
+	}
+
+	// 回退：读取内容流中的文本片段（适合未压缩/结构简单的 PDF）。
 	content := page.Content()
 	texts := content.Text
 	if len(texts) == 0 {
